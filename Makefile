@@ -47,3 +47,13 @@ $(BUILD)/libcudatopk_cuda.a: $(BUILD)/cuda.o
 
 $(BUILD)/test_cuda: tests/test_cuda.cu tests/cases.hpp tests/cuda_support.hpp $(BUILD)/libcudatopk_cuda.a
 	$(NVCC) $(CPPFLAGS) $(CUDA_FLAGS) $< $(BUILD)/libcudatopk_cuda.a -o $@
+
+.PHONY: bench bench-cuda
+bench: $(BUILD)/benchmark_cpu
+bench-cuda: $(BUILD)/benchmark_cuda
+
+$(BUILD)/benchmark_cpu: bench/benchmark.cu tests/cases.hpp $(BUILD)/libcudatopk.a
+	$(CXX) $(CPPFLAGS) $(HOST_FLAGS) -x c++ $< -x none $(BUILD)/libcudatopk.a $(LDFLAGS) -o $@
+
+$(BUILD)/benchmark_cuda: bench/benchmark.cu tests/cases.hpp tests/cuda_support.hpp $(BUILD)/libcudatopk.a $(BUILD)/libcudatopk_cuda.a
+	$(NVCC) $(CPPFLAGS) $(CUDA_FLAGS) -DCUDATOPK_BENCH_CUDA $< $(BUILD)/libcudatopk.a $(BUILD)/libcudatopk_cuda.a -o $@
