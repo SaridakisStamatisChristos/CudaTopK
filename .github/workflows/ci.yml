@@ -1,0 +1,31 @@
+name: CudaTopK CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -j2 test bench
+      - run: build/benchmark_cpu 3 423901
+  cuda-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CUDA 13.0 compiler, headers and runtime
+        run: |
+          python3 -m venv "$RUNNER_TEMP/cuda-venv"
+          "$RUNNER_TEMP/cuda-venv/bin/pip" install --target "$RUNNER_TEMP/cuda-wheel" \
+            nvidia-cuda-nvcc==13.0.88 nvidia-cuda-crt==13.0.88 \
+            nvidia-nvvm==13.0.88 nvidia-cuda-runtime==13.0.88 nvidia-cuda-cccl==13.0.85
+      - name: Compile and link CUDA for sm_86
+        run: |
+          toolkit="$RUNNER_TEMP/cuda-wheel/nvidia/cu13"
+          make -j2 cuda bench-cuda NVCC="$toolkit/bin/nvcc" \
+            NVCCFLAGS="-O3 -lineinfo -I$toolkit/include/cccl -L$toolkit/lib"
+      - name: Run driver-independent CUDA plan checks
+        run: build/test_cuda --plan-only

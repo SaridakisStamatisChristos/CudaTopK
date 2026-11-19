@@ -3,8 +3,62 @@
 #include "cuda_support.hpp"
 
 #include <iostream>
+#include <limits>
+#include <string_view>
 
-int main() {
+namespace {
+
+void check_concurrent_reduction() {
+    using cudatopk::Entry;
+    using cudatopk::GpuAlgorithm;
+    using cudatopk::GpuPlan;
+    // This shape exceeds a full grid stride in the capped reduction grid.
+    constexpr std::size_t n = 1048581;
+    const float infinity = std::numeric_limits<float>::infinity();
+    std::vector<float> a(n, 0.0f);
+    std::vector<float> b(n, -1.0f);
+    a[n - 1] = infinity;
+    a[n - 2] = infinity;
+    b[n - 1] = 9.0f;
+
+    GpuPlan plan;
+    cuda_check(cudatopk::make_gpu_plan(n, 1, GpuAlgorithm::automatic, plan), "plan concurrent shape");
+    const Stream stream_a;
+    const Stream stream_b;
+    const DeviceBuffer<float> input_a(n);
+    const DeviceBuffer<float> input_b(n);
+    const DeviceBuffer<Entry> output_a(1);
+    const DeviceBuffer<Entry> output_b(1);
+    const DeviceBuffer<unsigned char> work_a(plan.workspace_bytes());
+    const DeviceBuffer<unsigned char> work_b(plan.workspace_bytes());
+    Entry result_a{};
+    Entry result_b{};
+
+    const auto upload = [&](const auto& input, const auto& device, const auto& stream) {
+        cuda_check(cudaMemcpyAsync(device.get(), input.data(), n * sizeof(float),
+                                   cudaMemcpyHostToDevice, stream.get()), "upload concurrent input");
+    };
+    upload(a, input_a, stream_a);
+    upload(b, input_b, stream_b);
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        cuda_check(cudatopk::select_gpu(plan, input_a.get(), output_a.get(), work_a.get(),
+                                         plan.workspace_bytes(), stream_a.get()), "enqueue first stream");
+        cuda_check(cudatopk::select_gpu(plan, input_b.get(), output_b.get(), work_b.get(),
+                                         plan.workspace_bytes(), stream_b.get()), "enqueue second stream");
+    }
+    cuda_check(cudaMemcpyAsync(&result_a, output_a.get(), sizeof(result_a),
+                               cudaMemcpyDeviceToHost, stream_a.get()), "read first stream");
+    cuda_check(cudaMemcpyAsync(&result_b, output_b.get(), sizeof(result_b),
+                               cudaMemcpyDeviceToHost, stream_b.get()), "read second stream");
+    cuda_check(cudaStreamSynchronize(stream_a.get()), "complete first stream");
+    cuda_check(cudaStreamSynchronize(stream_b.get()), "complete second stream");
+    test::check(&result_a, a, {n - 2}, 1);
+    test::check(&result_b, b, {n - 1}, 1);
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
     try {
         using cudatopk::Entry;
         using cudatopk::GpuAlgorithm;
@@ -45,6 +99,12 @@ int main() {
                       "incorrect reduction workspace bound");
         test::require(cudatopk::make_gpu_plan(3, 2, reduction, plan)
                           == cudaErrorInvalidValue, "reduction accepted k > 1");
+
+        if (argc == 2 && std::string_view(argv[1]) == "--plan-only") {
+            std::cout << "CUDA: pre-device plan and argument checks passed\n";
+            return 0;
+        }
+        test::require(argc == 1, "usage: test_cuda [--plan-only]");
 
         int devices = 0;
         const auto probe = cudaGetDeviceCount(&devices);
@@ -102,7 +162,9 @@ int main() {
                 ++cases;
             }
         });
-        std::cout << "CUDA: " << cases << " oracle comparisons and API checks passed\n";
+        check_concurrent_reduction();
+        std::cout << "CUDA: " << cases
+                  << " oracle comparisons, API checks and two-stream reuse passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

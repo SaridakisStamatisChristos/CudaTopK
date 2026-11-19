@@ -27,7 +27,7 @@ $(BUILD)/test_merge: tests/test_merge.cpp tests/cases.hpp src/tiled.hpp include/
 	$(CXX) $(CPPFLAGS) $(HOST_FLAGS) $< $(LDFLAGS) -o $@
 
 clean:
-	rm -rf -- "$(BUILD)"
+	$(RM) -- $(addprefix $(BUILD)/,cpu.o cuda.o libcudatopk.a libcudatopk_cuda.a test_cpu test_merge test_cuda benchmark_cpu benchmark_cuda)
 
 NVCC ?= nvcc
 NVCCFLAGS ?= -O3 -lineinfo
