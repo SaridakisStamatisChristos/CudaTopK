@@ -34,6 +34,18 @@ int main() {
         test::require(plan.workspace_bytes() == 3 * 256 * sizeof(std::uint64_t),
                       "unexpected two-tile workspace");
 
+        constexpr auto reduction = GpuAlgorithm::reduction;
+        cuda_check(cudatopk::make_gpu_plan(1024, 1, GpuAlgorithm::automatic, plan),
+                   "plan one-block reduction");
+        test::require(plan.algorithm() == reduction && plan.workspace_bytes() == 0,
+                      "incorrect one-block reduction plan");
+        cuda_check(cudatopk::make_gpu_plan(INT32_MAX, 1, reduction, plan),
+                   "plan bounded reduction workspace");
+        test::require(plan.workspace_bytes() == 1024 * sizeof(std::uint64_t),
+                      "incorrect reduction workspace bound");
+        test::require(cudatopk::make_gpu_plan(3, 2, reduction, plan)
+                          == cudaErrorInvalidValue, "reduction accepted k > 1");
+
         int devices = 0;
         const auto probe = cudaGetDeviceCount(&devices);
         if (probe != cudaSuccess || devices == 0) {
@@ -64,8 +76,9 @@ int main() {
 
         std::size_t cases = 0;
         test::exercise([&](const auto& input, auto k, const auto& expected) {
-            for (const auto algorithm : {radix, GpuAlgorithm::tiled, GpuAlgorithm::automatic}) {
-                if (algorithm == GpuAlgorithm::tiled && k > 256) {
+            for (const auto algorithm : {radix, GpuAlgorithm::tiled, reduction, GpuAlgorithm::automatic}) {
+                if ((algorithm == GpuAlgorithm::tiled && k > 256) ||
+                    (algorithm == reduction && k > 1)) {
                     continue;
                 }
                 GpuPlan shape;

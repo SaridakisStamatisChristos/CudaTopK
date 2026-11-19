@@ -6,8 +6,9 @@
 
 namespace cudatopk {
 
-// Tiled selection accepts k <= 256. Automatic chooses it for that range.
-enum class GpuAlgorithm { automatic, radix_sort, tiled };
+// Tiled accepts k <= 256 and reduction accepts k <= 1. Automatic uses
+// reduction for k = 1, tiled for other small k, and radix sort otherwise.
+enum class GpuAlgorithm { automatic, radix_sort, tiled, reduction };
 
 class GpuPlan {
 public:

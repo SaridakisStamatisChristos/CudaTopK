@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <cub/block/block_radix_sort.cuh>
+#include <cub/block/block_reduce.cuh>
 #include <cub/device/device_radix_sort.cuh>
 
 #include "key.hpp"
@@ -21,6 +22,10 @@ constexpr std::size_t workspace_alignment = 256;
 
 int capped_grid(int blocks) noexcept {
     return std::min(65535, blocks);
+}
+
+int reduction_grid(int n) noexcept {
+    return std::min(1024, detail::ceil_div(n, detail::tile_items));
 }
 
 int grid_for(int n) noexcept {
@@ -47,6 +52,55 @@ __global__ void gather(const float* input, const Key* keys, Entry* output, int k
          i < static_cast<std::size_t>(k); i += stride) {
         write_entry(input, output + i, keys[i]);
     }
+}
+
+// Compare packed keys so even exceptional floats have a deterministic winner.
+struct MaxKey {
+    __device__ Key operator()(Key a, Key b) const { return a > b ? a : b; }
+};
+
+using BlockMax = cub::BlockReduce<Key, threads>;
+
+__global__ void reduce_input(const float* input, int n, Key* partials, Entry* output) {
+    __shared__ BlockMax::TempStorage storage;
+    const auto stride = static_cast<std::size_t>(blockDim.x) * gridDim.x;
+    Key best = 0;
+    for (std::size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < static_cast<std::size_t>(n); i += stride) {
+        best = MaxKey{}(best, detail::rank_key(__float_as_uint(input[i]), static_cast<std::uint32_t>(i)));
+    }
+    const Key winner = BlockMax(storage).Reduce(best, MaxKey{});
+    if (threadIdx.x == 0) {
+        if (partials) {
+            partials[blockIdx.x] = winner;
+        } else {
+            write_entry(input, output, winner);
+        }
+    }
+}
+
+__global__ void reduce_partials(const float* input, const Key* partials, int count, Entry* output) {
+    __shared__ BlockMax::TempStorage storage;
+    Key best = 0;
+    for (int i = threadIdx.x; i < count; i += threads) {
+        best = MaxKey{}(best, partials[i]);
+    }
+    const Key winner = BlockMax(storage).Reduce(best, MaxKey{});
+    if (threadIdx.x == 0) {
+        write_entry(input, output, winner);
+    }
+}
+
+cudaError_t select_one(const float* input, Entry* output, int n, Key* scratch,
+                       cudaStream_t stream) {
+    const int blocks = reduction_grid(n);
+    reduce_input<<<blocks, threads, 0, stream>>>(input, n, blocks == 1 ? nullptr : scratch, output);
+    const auto status = cudaGetLastError();
+    if (status != cudaSuccess || blocks == 1) {
+        return status;
+    }
+    reduce_partials<<<1, threads, 0, stream>>>(input, scratch, blocks, output);
+    return cudaGetLastError();
 }
 
 // Block radix sort starts from blocked registers and ends in striped order.
@@ -147,10 +201,22 @@ cudaError_t make_gpu_plan(std::size_t n, std::size_t k, GpuAlgorithm algorithm,
     }
 
     if (algorithm == GpuAlgorithm::automatic) {
-        algorithm = k <= detail::tiled_max_k ? GpuAlgorithm::tiled : GpuAlgorithm::radix_sort;
+        if (k == 1) {
+            algorithm = GpuAlgorithm::reduction;
+        } else {
+            algorithm = k <= detail::tiled_max_k ? GpuAlgorithm::tiled : GpuAlgorithm::radix_sort;
+        }
     }
-    if ((algorithm != GpuAlgorithm::tiled && algorithm != GpuAlgorithm::radix_sort) ||
-        (algorithm == GpuAlgorithm::tiled && k > detail::tiled_max_k)) {
+    switch (algorithm) {
+    case GpuAlgorithm::reduction:
+        if (k > 1) return cudaErrorInvalidValue;
+        break;
+    case GpuAlgorithm::tiled:
+        if (k > detail::tiled_max_k) return cudaErrorInvalidValue;
+        break;
+    case GpuAlgorithm::radix_sort:
+        break;
+    default:
         return cudaErrorInvalidValue;
     }
 
@@ -158,6 +224,10 @@ cudaError_t make_gpu_plan(std::size_t n, std::size_t k, GpuAlgorithm algorithm,
     next.n_ = static_cast<int>(n);
     next.k_ = static_cast<int>(k);
     next.algorithm_ = algorithm;
+    if (algorithm == GpuAlgorithm::reduction && k != 0) {
+        const int blocks = reduction_grid(next.n_);
+        next.workspace_bytes_ = blocks > 1 ? blocks * sizeof(Key) : 0;
+    }
     if (algorithm == GpuAlgorithm::tiled && k != 0) {
         const auto tiles = detail::ceil_div(next.n_, detail::tile_items);
         if (tiles > 1) {
@@ -194,6 +264,9 @@ cudaError_t select_gpu(const GpuPlan& plan, const float* input, Entry* output,
     }
 
     auto* keys = static_cast<Key*>(workspace);
+    if (plan.algorithm_ == GpuAlgorithm::reduction) {
+        return select_one(input, output, plan.n_, keys, stream);
+    }
     if (plan.algorithm_ == GpuAlgorithm::tiled) {
         return select_tiled(input, output, plan.n_, plan.k_, keys, plan.second_offset_, stream);
     }
