@@ -24,3 +24,22 @@ $(BUILD)/test_cpu: tests/test_cpu.cpp tests/cases.hpp $(BUILD)/libcudatopk.a
 
 clean:
 	rm -rf -- "$(BUILD)"
+
+NVCC ?= nvcc
+NVCCFLAGS ?= -O3 -lineinfo
+CUDA_ARCH ?= 86
+CUDA_FLAGS = $(NVCCFLAGS) -std=c++17 -gencode arch=compute_$(CUDA_ARCH),code=[sm_$(CUDA_ARCH),compute_$(CUDA_ARCH)]
+
+.PHONY: cuda test-gpu
+cuda: $(BUILD)/libcudatopk_cuda.a $(BUILD)/test_cuda
+test-gpu: cuda
+	$(BUILD)/test_cuda
+
+$(BUILD)/cuda.o: src/cuda.cu src/key.hpp include/cudatopk/cuda.hpp include/cudatopk/topk.hpp | $(BUILD)
+	$(NVCC) $(CPPFLAGS) $(CUDA_FLAGS) -c $< -o $@
+
+$(BUILD)/libcudatopk_cuda.a: $(BUILD)/cuda.o
+	$(AR) rcs $@ $^
+
+$(BUILD)/test_cuda: tests/test_cuda.cu tests/cases.hpp tests/cuda_support.hpp $(BUILD)/libcudatopk_cuda.a
+	$(NVCC) $(CPPFLAGS) $(CUDA_FLAGS) $< $(BUILD)/libcudatopk_cuda.a -o $@
