@@ -21,6 +21,19 @@ int main() {
         test::require(cudatopk::make_gpu_plan(0, 0, static_cast<GpuAlgorithm>(99), plan)
                           == cudaErrorInvalidValue, "invalid algorithm accepted");
 
+        cuda_check(cudatopk::make_gpu_plan(1024, 256, GpuAlgorithm::automatic, plan),
+                   "plan automatic single tile");
+        test::require(plan.algorithm() == GpuAlgorithm::tiled && plan.workspace_bytes() == 0,
+                      "single tile should use no workspace");
+        test::require(cudatopk::make_gpu_plan(1024, 257, GpuAlgorithm::tiled, plan)
+                          == cudaErrorInvalidValue, "tiled accepted oversized k");
+        test::require(plan.algorithm() == GpuAlgorithm::tiled && plan.workspace_bytes() == 0,
+                      "failed plan preparation changed the previous plan");
+        cuda_check(cudatopk::make_gpu_plan(1025, 256, GpuAlgorithm::tiled, plan),
+                   "plan two tiles");
+        test::require(plan.workspace_bytes() == 3 * 256 * sizeof(std::uint64_t),
+                      "unexpected two-tile workspace");
+
         int devices = 0;
         const auto probe = cudaGetDeviceCount(&devices);
         if (probe != cudaSuccess || devices == 0) {
@@ -51,25 +64,30 @@ int main() {
 
         std::size_t cases = 0;
         test::exercise([&](const auto& input, auto k, const auto& expected) {
-            GpuPlan shape;
-            cuda_check(cudatopk::make_gpu_plan(input.size(), k, radix, shape), "plan shape");
-            DeviceBuffer<float> values(k ? input.size() : 0);
-            DeviceBuffer<Entry> output(k);
-            DeviceBuffer<unsigned char> workspace(shape.workspace_bytes());
-            std::vector<Entry> actual(k);
-            if (k) {
-                cuda_check(cudaMemcpyAsync(values.get(), input.data(), input.size() * sizeof(float),
-                                           cudaMemcpyHostToDevice, stream.get()), "copy input");
+            for (const auto algorithm : {radix, GpuAlgorithm::tiled, GpuAlgorithm::automatic}) {
+                if (algorithm == GpuAlgorithm::tiled && k > 256) {
+                    continue;
+                }
+                GpuPlan shape;
+                cuda_check(cudatopk::make_gpu_plan(input.size(), k, algorithm, shape), "plan shape");
+                DeviceBuffer<float> values(k ? input.size() : 0);
+                DeviceBuffer<Entry> output(k);
+                DeviceBuffer<unsigned char> workspace(shape.workspace_bytes());
+                std::vector<Entry> actual(k);
+                if (k) {
+                    cuda_check(cudaMemcpyAsync(values.get(), input.data(), input.size() * sizeof(float),
+                                               cudaMemcpyHostToDevice, stream.get()), "copy input");
+                }
+                cuda_check(cudatopk::select_gpu(shape, values.get(), output.get(), workspace.get(),
+                                                 shape.workspace_bytes(), stream.get()), "enqueue selection");
+                if (k) {
+                    cuda_check(cudaMemcpyAsync(actual.data(), output.get(), k * sizeof(Entry),
+                                               cudaMemcpyDeviceToHost, stream.get()), "copy output");
+                }
+                cuda_check(cudaStreamSynchronize(stream.get()), "complete selection");
+                test::check(actual.data(), input, expected, k);
+                ++cases;
             }
-            cuda_check(cudatopk::select_gpu(shape, values.get(), output.get(), workspace.get(),
-                                             shape.workspace_bytes(), stream.get()), "enqueue selection");
-            if (k) {
-                cuda_check(cudaMemcpyAsync(actual.data(), output.get(), k * sizeof(Entry),
-                                           cudaMemcpyDeviceToHost, stream.get()), "copy output");
-            }
-            cuda_check(cudaStreamSynchronize(stream.get()), "complete selection");
-            test::check(actual.data(), input, expected, k);
-            ++cases;
         });
         std::cout << "CUDA: " << cases << " oracle comparisons and API checks passed\n";
     } catch (const std::exception& error) {

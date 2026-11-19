@@ -7,8 +7,9 @@ HOST_FLAGS = $(CXXFLAGS) -std=c++17
 
 .PHONY: all test clean
 all: $(BUILD)/libcudatopk.a
-test: $(BUILD)/test_cpu
+test: $(BUILD)/test_cpu $(BUILD)/test_merge
 	$(BUILD)/test_cpu
+	$(BUILD)/test_merge
 
 $(BUILD):
 	mkdir -p $@
@@ -21,6 +22,9 @@ $(BUILD)/libcudatopk.a: $(BUILD)/cpu.o
 
 $(BUILD)/test_cpu: tests/test_cpu.cpp tests/cases.hpp $(BUILD)/libcudatopk.a
 	$(CXX) $(CPPFLAGS) $(HOST_FLAGS) $< $(BUILD)/libcudatopk.a $(LDFLAGS) -o $@
+
+$(BUILD)/test_merge: tests/test_merge.cpp tests/cases.hpp src/tiled.hpp include/cudatopk/topk.hpp | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(HOST_FLAGS) $< $(LDFLAGS) -o $@
 
 clean:
 	rm -rf -- "$(BUILD)"
@@ -35,7 +39,7 @@ cuda: $(BUILD)/libcudatopk_cuda.a $(BUILD)/test_cuda
 test-gpu: cuda
 	$(BUILD)/test_cuda
 
-$(BUILD)/cuda.o: src/cuda.cu src/key.hpp include/cudatopk/cuda.hpp include/cudatopk/topk.hpp | $(BUILD)
+$(BUILD)/cuda.o: src/cuda.cu src/key.hpp src/tiled.hpp include/cudatopk/cuda.hpp include/cudatopk/topk.hpp | $(BUILD)
 	$(NVCC) $(CPPFLAGS) $(CUDA_FLAGS) -c $< -o $@
 
 $(BUILD)/libcudatopk_cuda.a: $(BUILD)/cuda.o

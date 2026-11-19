@@ -6,7 +6,8 @@
 
 namespace cudatopk {
 
-enum class GpuAlgorithm { radix_sort };
+// Tiled selection accepts k <= 256. Automatic chooses it for that range.
+enum class GpuAlgorithm { automatic, radix_sort, tiled };
 
 class GpuPlan {
 public:
@@ -18,7 +19,7 @@ private:
     int k_ = 0;
     GpuAlgorithm algorithm_ = GpuAlgorithm::radix_sort;
     std::size_t workspace_bytes_ = 0;
-    std::size_t sort_offset_ = 0;
+    std::size_t second_offset_ = 0;
 
     friend cudaError_t make_gpu_plan(std::size_t, std::size_t, GpuAlgorithm, GpuPlan&) noexcept;
     friend cudaError_t select_gpu(const GpuPlan&, const float*, Entry*, void*, std::size_t,
@@ -31,7 +32,8 @@ cudaError_t make_gpu_plan(std::size_t n, std::size_t k, GpuAlgorithm algorithm,
                           GpuPlan& plan) noexcept;
 
 // Enqueue selection with the same ordering as select_cpu, without allocation
-// or synchronization. For k > 0, input and output must be disjoint device
+// or synchronization. Execute on the device used to prepare the plan.
+// For k > 0, input and output must be disjoint device
 // accessible buffers, with n and k elements respectively. If needed, workspace
 // must be disjoint, at least workspace_bytes() bytes, and 256-byte aligned
 // (as provided by cudaMalloc). Keep buffers alive until stream completion.
